@@ -1,0 +1,398 @@
+
+regex_chars_simple = '.^$|123456789()!=<{}[]\\'
+mapping = {char: '\\'+char if char in '123456789()!=<{}[]\\' else char for char in regex_chars_simple}
+mapped = 'QWERTYUIOdcep'
+regex_chars_simple += mapped
+mapping.update({char: digit for char, digit in zip(mapped, list('123456789') + ['\\.', '\\^', '\\$', '\\|'])})
+weighted_regex_chars = '.^^$$|1234QWERTYUIO'
+U = set(regex_chars_simple)
+regex_chars_choose = regex_chars_simple + weighted_regex_chars
+TIMEOUT = 0.00001
+
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+def compile_regex(data, ops, options={'add_anchors'}):
+    i = 0
+    data = [mapping[char] for char in data]
+    memory = []
+    for op in ops:
+        if op == "A":
+            char = data[i]
+            i += 1
+            memory.append(char)
+        elif op == "J":
+            string = memory[-2] + memory.pop()
+            memory[-1] = string
+        elif op == "C":
+            memory[-1] = f'[{memory[-1]}]'
+        elif op == "G":
+            memory[-1] = f'({memory[-1]})'
+        elif op == "P":
+            memory[-1] = f'(?={memory[-1]})'
+        elif op == "N":
+            memory[-1] = f'(?!{memory[-1]})'
+        elif op == "p":
+            memory[-1] = f'(?<={memory[-1]})'
+        elif op == "n":
+            memory[-1] = f'(?<!{memory[-1]})'
+        elif op == "*":
+            memory[-1] = f'{memory[-1]}*'
+        elif op == "+":
+            memory[-1] = f'{memory[-1]}+'
+            
+        elif op in '23456789':
+            memory[-1] += '{'+op+'}'
+    return '^' + ''.join(memory) + ''.join(data[i:]) + '$'
+
+# note AAJAJAAAJJJ === AAAAAAJJJJJ
+## should not:
+# start without using at least one A
+# repeat 2-9
+# repeat GPNpn
+
+## in data:
+# repeat |
+# put + or * after (J or + or *)
+
+# Function to generate a random regex pattern
+def generate_random_pattern(size=8, group_thresh=0.25):
+    while True:
+        data = 'c'+''.join(random.choices(regex_chars_choose, k=(size-2)))+'e'
+        instruct = ["A"]
+        elems = len(data)
+        mem = 0
+        for _ in range(elems-1):
+            while True:
+                p = 1 - 2**(-mem)
+                if random.random() < p:
+                    instruct.append('J')
+                    mem -= 1
+                    continue
+                break
+            if random.random() < group_thresh:
+                l = random.randint(1, 120)
+                if l <= 30:
+                    instruct.append('G')
+                elif l <= 40:
+                    instruct.append('P')
+                elif l <= 50:
+                    instruct.append('N')
+                elif l <= 55:
+                    instruct.append('p')
+                elif l <= 60:
+                    instruct.append('n')
+                elif l <= 80:
+                    if instruct[-1] not in 'J23456789+*':
+                        instruct.append('+')
+                elif l <= 100:
+                    if instruct[-1] not in 'J23456789+*':
+                        instruct.append('*')
+                elif l <= 105:
+                    if instruct[-1] not in 'J23456789+*':
+                        instruct.append('2')
+                elif l <= 110:
+                    if instruct[-1] not in 'J23456789+*':
+                        instruct.append('3')
+                elif l <= 115:
+                    if instruct[-1] not in 'J23456789+*':
+                        instruct.append('4')
+                elif l <= 120:
+                    if instruct[-1] not in 'J23456789+*':
+                        instruct.append('5')
+                elif l < 150:
+                    instruct.append('C')
+            instruct.append('A')
+            mem += 1
+        newstr = ''.join(instruct)
+        newstr += 'J' * (newstr.count('A') - newstr.count('J') - 1)
+        parsed_regexp = compile_regex(data, newstr)
+        if '||' in parsed_regexp or '|)' in parsed_regexp or '(|' in parsed_regexp or '(|' in parsed_regexp  or '??' in parsed_regexp:
+            continue
+        return data, newstr
+# probably works
+
+def any_match(patt, string):
+    if string and patt:
+        return patt.search(string, timeout=TIMEOUT) is not None
+    return 1
+
+def fraction_of_match(patt, string):
+    match = patt.search(string, timeout=TIMEOUT)
+    str_len = len(string)
+    return ((match.end() - match.start()) / str_len if match else 0) if str_len else int(bool(match))
+
+# Fitness function to evaluate how close a pattern is to behaving like a quine
+
+def runs_of(data, runvals):
+    maxlen = 0
+    thislen = 0
+    for c in data:
+        if c in runvals:
+            thislen += 1
+        else:
+            if thislen > maxlen:
+                maxlen = thislen
+            thislen = 0
+    return maxlen
+
+DES = 42
+
+reAJ = regex.compile('[AJ]+')
+
+def fitness(data, instruct, sampled=True):
+    pattern = compile_regex(data, instruct)
+    if len(data) <= 5 or len(data) > 24:
+        return -1
+    try:
+        l = len(data+instruct)
+        counter = Counter(data)
+        #desired_size = l / DES if l < DES else DES / (l-DES+1)
+        ## at this stage a desired size doesn't make sense to me
+        overuse_metric = counter.most_common(1)[0][1] / len(data)
+        patt = regex.compile(pattern)
+        variety = min(7, len(set(instruct) - set('23456789')))
+        # want a varienty of instructions, but too much is likely not beneficial
+        badness = (
+            runs_of(instruct, '+*23456789')
+            + data.count('||') + pattern.count('|)')
+            + pattern.count('(|')+ pattern.count('(|')
+            + pattern.count('??') + pattern.count('\\\\\\')
+            + pattern.count('..')
+            + runs_of(instruct, 'GPNpn')
+        )
+        badness += max(len(frag) for frag in reAJ.split(instruct))
+        perfect = True
+        self_match = int(fraction_of_match(patt, pattern) is not None)
+        if not self_match:
+            perfect = False
+        empty_match = any_match(patt, '')
+        if empty_match:
+            perfect = False
+        cover_match = sum(any_match(patt, '('*i+pattern+')'*i) for i in range(3))
+        if cover_match > 0:
+            perfect = False
+        drop_one_match = sum(any_match(patt, pattern[:i] + pattern[i+1:]) for i in range(len(pattern))) / len(pattern)
+        if drop_one_match > 0:
+            perfect = False
+        replace_one_data =  [(i, u) for i in range(len(pattern)) for u in U]
+        if sampled: replace_one_data = random.sample(replace_one_data, 8)
+        replace_one_match = sum(any_match(patt, pattern[:i] + u + pattern[i+1:]) for i, u in replace_one_data) / 10
+        if replace_one_match > 0:
+            perfect = False
+        if perfect:
+            print(f'perfect score for <<{patt}>>')
+        return (self_match*7+1)/(cover_match*3+1)/(empty_match+1)/(drop_one_match+1)/(replace_one_match+1)/(badness+1)*(variety+1)/(1+overuse_metric)
+    except (regex.error, OverflowError, TimeoutError):
+        # Penalize invalid or long running regex patterns
+        return -1
+
+def strip_from_last_element(lst, element):
+    newlist = list(lst)
+    if len(newlist) == 0:
+        return []
+    
+    while newlist.pop() != element:
+        if len(newlist) == 0:
+            return []
+    return newlist
+
+def do_mutate_action(action, data, instruct):
+    if action == 'add_data' and len(data) > 3:
+        pos = random.randrange(1, len(data)-1)
+        data[pos:pos] = [random.choice(regex_chars_choose)]
+        instruct.append('A')
+        instruct.append('J')
+    elif action == 'remove_data' and len(data) > 3:
+        position = random.randrange(1, len(data)-1)
+        data = data[:position] + data[position+1:]
+        instruct = strip_from_last_element(instruct, 'A')
+    elif action == 'replace_data' and len(data) > 3:
+        position = random.randrange(1, len(data)-1)
+        char = random.choice(regex_chars_choose)
+        data[position] = char
+    elif action == 'swap_data' and len(data) > 5:
+        pos1, pos2 = random.sample(range(1, len(data)-1), 2)
+        data[pos1], data[pos2] = data[pos2], data[pos1]
+    elif action == 'swap_instruct':
+        possible = [p for p in range(1, len(instruct)) if instruct[p] not in 'JA']
+        if len(possible) < 3:
+            return data, instruct
+        pos1, pos2 = random.sample(possible, 2)
+        instruct[pos1], instruct[pos2] = instruct[pos2], instruct[pos1]
+    elif action == 'replace_instruct' and len(instruct) > 3:
+        choices = [i for i, e in enumerate(instruct) if e not in 'JA']
+        if len(choices) < 1:
+            return data, instruct
+        pos = random.choice(choices)
+        new = random.choice('CGPNpn23456789+*')
+        instruct[pos] = new
+    elif action == 'insert_instruct' and len(instruct) > 3:
+        pos1 = random.randrange(1, len(instruct)+1)
+        new = random.choice('CGPNpn23456789+*')
+        instruct[pos1:pos1] = [new]
+    elif action == 'remove_instruct':
+        choices = [i for i, e in enumerate(instruct) if e not in 'JA']
+        if len(choices) < 1:
+            return data, instruct
+        pos1 = random.choice(choices)
+        instruct[pos1:pos1+1] = []
+
+    return data, instruct
+
+
+actions = [
+        ('add_data', 90),
+        ('remove_data', 10),
+        ('replace_data', 20),
+        ('swap_data', 20),
+        ('swap_instruct', 20),
+        ('replace_instruct', 20),
+        ('insert_instruct', 90),
+        ('remove_instruct', 10),
+]
+choices = [y[0] for y in actions]
+prob = np.cumsum([y[1] for y in actions])
+
+def mutate(pattern):
+    data, instruct = pattern
+    data = list(data)
+    instruct = list(instruct)
+    # Apply multiple mutations based on mutation rate
+    for _ in range(random.randrange(1, 6)):
+        selection_p = random.randrange(prob[-1])
+        action = choices[np.searchsorted(prob, selection_p, side='right')]
+        old_data = list(data)
+        old_instruct = list(instruct)
+        data, instruct = do_mutate_action(action, data, instruct)
+    '''try:
+        regex.compile(compile_regex(data, instruct))
+    except (regex.error, OverflowError, TimeoutError):
+        return ''.join(old_data), ''.join(old_instruct)
+    except IndexError as e:
+        #print(''.join(old_data), ''.join(old_instruct), len(old_data), sum(int(i == 'J') for i in old_instruct), sum(int(i == 'A') for i in old_instruct))
+        raise e'''
+    return ''.join(data), ''.join(instruct)
+
+
+# Crossover function to combine two patterns
+def crossover(p1, p2):
+    crossings1 = []
+    crossings2 = []
+    data1, instruct1 = p1
+    data2, instruct2 = p2
+    balance = 0
+    i = -1
+    for j, char in enumerate(instruct1):
+        if char == 'A':
+            balance += 1
+            i += 1
+        elif char == 'J':
+            balance -= 1
+        else:
+            continue
+        if balance == 1 and i > 1:
+            crossings1.append((i, j+1))
+    balance = 0
+    i = -1
+    for j, char in enumerate(instruct2):
+        if char == 'A':
+            balance += 1
+            i += 1
+        elif char == 'J':
+            balance -= 1
+        else:
+            continue
+        if balance == 1 and i > 1:
+            crossings2.append((i, j+1))
+    data1i, instruct1i = random.choice(crossings1)
+    data2i, instruct2i = random.choice(crossings2)
+    child = (data1[:data1i] + data2[data2i:], instruct1[:instruct1i:] + instruct2[instruct2i:])
+    return child
+
+existing = []
+
+if os.path.exists('candidates.elite'):
+    with open('candidates.elite', 'r') as f:
+        for line in f.readlines():
+            pair = line.rstrip('\n').split('%')
+            if len(pair) == 2:
+                existing.append(pair)
+
+def evolve_population(population_size=1000, generations=10000, elitism_fraction=0.2, mutate_fraction=0.4, pool_fraction=0.25):
+    global population, elites, existing, best_regex
+    # Initialize population
+    population = existing + [generate_random_pattern() for _ in range(population_size - len(existing))]
+    
+    for generation in tqdm(range(generations)):
+        # Evaluate fitness
+        
+        fitness_scores = [fitness(*p) for p in population]
+
+        #shared_fitness = calculate_shared_fitness(population, fitness_scores)
+        
+        # Sort population by fitness in descending order
+        sorted_indices = np.argsort(fitness_scores)[::-1]
+        sorted_population = [population[i] for i in sorted_indices]
+        sorted_fitness = [fitness_scores[i] for i in sorted_indices]
+        
+        # Select the top performers as guaranteed
+        elite_count = int(population_size * elitism_fraction)
+        elites = sorted_population[:elite_count]
+        best_regex = elites[0]  # Return the best pattern found
+        
+        # Print best pattern and fitness every few generations
+        if generation % 50 == 0 or generation == generations - 1:
+            best_pattern = elites[0]
+            print(f"Generation {str(generation).zfill(8)}: Best Pattern: '{compile_regex(*best_pattern)}' with fitness: {fitness_scores[sorted_indices[0]]}")
+        
+        next_generation = list(elites)
+
+
+        mutate_count = int(population_size * mutate_fraction)
+        cumulative_fitness = np.cumsum(sorted_fitness[:mutate_count])
+        total_p = cumulative_fitness[-1]
+        for _ in range(mutate_count):
+            selection_p = np.random.random() * total_p
+            parent = sorted_population[np.searchsorted(cumulative_fitness, selection_p)]
+            next_generation.append(mutate(parent))
+
+        
+        pool_count = int(population_size * pool_fraction)
+
+        pool = sorted_population[:pool_count]
+        
+        # calculate cumulative sum of fitness scores
+        cumulative_fitness = np.cumsum(sorted_fitness[:pool_count])
+        total_p = cumulative_fitness[-1]
+        while len(next_generation) < len(population):
+            # select parent1
+            selection_p = np.random.random() * total_p
+            parent1 = sorted_population[np.searchsorted(cumulative_fitness, selection_p, side='right')]
+            # select parent2
+            selection_p = np.random.random() * total_p
+            parent2 = sorted_population[np.searchsorted(cumulative_fitness, selection_p, side='right')]
+            cross = crossover(parent1, parent2)
+            if random.random() < 0.3:
+                next_generation.append(mutate(cross))
+            else:
+                next_generation.append(cross)
+        population = next_generation
+
+try:
+    # Run the evolutionary algorithm
+    evolve_population()
+except KeyboardInterrupt as e:
+    raise e
+finally:
+    items = []
+    l = len(elites)
+    scores = [(fitness(d, i), d, i) for (d, i) in (elites + existing)]
+    scores = sorted(scores)[::-1]
+    for _, d, i in scores[:l]:
+        items.append(f"{d}%{i}")
+    with open('candidates.elite', 'w') as f:
+        for item in items:
+            print(item, file=f)
+    for elite in elites:
+        print(f'{fitness(*elite):.3f} - {compile_regex(*elite)}')
